@@ -27,13 +27,15 @@ static char help[] = "Solves 2D Poisson equation using multigrid.\n\n";
 #include <petscksp.h>
 #include <petscsys.h>
 #include <petscvec.h>
-
-extern PetscErrorCode ComputeJacobian(KSP,Mat,Mat,void*);
-extern PetscErrorCode ComputeRHS(KSP,Vec,void*);
+#include <petscdmplex.h>
 
 typedef struct {
   PetscScalar uu, tt;
 } UserContext;
+
+extern PetscErrorCode ComputeJacobian(KSP,Mat,Mat,void*);
+extern PetscErrorCode ComputeRHS(KSP,Vec,void*);
+extern PetscErrorCode CreateQuadMesh(MPI_Comm, DM*);
 
 int main(int argc,char **argv)
 {
@@ -41,11 +43,11 @@ int main(int argc,char **argv)
   DM             da;
   UserContext    user;
   PetscErrorCode ierr;
+  Vec		 x;
 
   ierr = PetscInitialize(&argc,&argv,(char*)0,help);if (ierr) return ierr;
   ierr = KSPCreate(PETSC_COMM_WORLD,&ksp);CHKERRQ(ierr);
-  ierr = DMDACreate2d(PETSC_COMM_WORLD, DM_BOUNDARY_NONE, DM_BOUNDARY_NONE,DMDA_STENCIL_STAR,11,11,PETSC_DECIDE,PETSC_DECIDE,1,1,NULL,NULL,&da);CHKERRQ(ierr);
-  ierr = DMSetFromOptions(da);CHKERRQ(ierr);
+  ierr = CreateQuadMesh(PETSC_COMM_WORLD, &da);
   ierr = DMSetUp(da);CHKERRQ(ierr);
   ierr = KSPSetDM(ksp,(DM)da);CHKERRQ(ierr);
   ierr = DMSetApplicationContext(da,&user);CHKERRQ(ierr);
@@ -57,11 +59,89 @@ int main(int argc,char **argv)
   ierr = KSPSetComputeOperators(ksp,ComputeJacobian,&user);CHKERRQ(ierr);
   ierr = KSPSetFromOptions(ksp);CHKERRQ(ierr);
   ierr = KSPSolve(ksp,NULL,NULL);CHKERRQ(ierr);
+  ierr = KSPGetSolution(ksp,&x);CHKERRQ(ierr);
+  ierr = VecView(x,PETSC_VIEWER_STDOUT_WORLD);CHKERRQ(ierr);
 
   ierr = DMDestroy(&da);CHKERRQ(ierr);
   ierr = KSPDestroy(&ksp);CHKERRQ(ierr);
   ierr = PetscFinalize();
   return ierr;
+}
+
+PetscErrorCode CreateQuadMesh(MPI_Comm comm, DM *dm)
+{
+
+    //0----1----2
+    //|    |    |
+    //3----4----5
+    //|    |    |
+    //6----7----8
+
+    //cell: [0 1 4 3  1 2 5 4  4 5 8 7  3 4 6 7]
+    //vertexcoord: [0 0  1 0  2 0  0 1  1 1  2 1  0 2  1 2  2 2]
+
+    PetscErrorCode ierr;
+    PetscInt dim = 2;
+    PetscInt numCells=4;
+    PetscInt numVertices=9;
+    PetscInt numCorners=4;
+
+    int *cell;
+    double *vertexCoords;
+
+    PetscFunctionBeginUser;
+    ierr = PetscMalloc1(numCells*numCorners,&cell);CHKERRQ(ierr);
+    ierr = PetscMalloc1(numVertices*dim,&vertexCoords);CHKERRQ(ierr);
+
+    int numCells_x = 2;
+    int numCells_y = 2;
+    int v1 = 0;
+    int v2 = 1;
+    int v3 = 1+numCells_x; 
+    int v4 = 2+numCells_x;
+    int cell_num = 1;
+    for (int i = 0; i < numCells*numCorners-3; i+=4)
+    {
+        cell[i] = v1;
+        cell[i+1] = v2;
+        cell[i+2] = v3;
+        cell[i+3] = v4;
+        if (cell_num == numCells_x)
+        {
+            v1+=2; v2+=2; v3+=2; v4+=2;
+            cell_num =1;
+        }
+        else
+        {
+            v1++; v2++; v3++; v4++;
+            cell_num++;
+        }
+    }
+
+    int x = 0;
+    int y = 0;
+    cell_num = 0;
+    for (int i = 0; i < numVertices*dim-1; i+=2)
+    {
+        vertexCoords[i] = x;
+        vertexCoords[i+1] = y;
+        if (cell_num == numCells_x)
+        {
+            x = 0;
+            y++;
+            cell_num =1;
+        }
+        else
+        {
+            x++;
+            cell_num++;
+        }
+    }    
+    
+    ierr = DMPlexCreateFromCellList(comm, dim, numCells, numVertices, numCorners, PETSC_TRUE, cell, dim, vertexCoords, dm);CHKERRQ(ierr);
+    ierr = PetscFree(cell);CHKERRQ(ierr);
+    ierr = PetscFree(vertexCoords);CHKERRQ(ierr);
+    PetscFunctionReturn(0);
 }
 
 PetscErrorCode ComputeRHS(KSP ksp,Vec b,void *ctx)
