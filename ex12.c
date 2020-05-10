@@ -504,6 +504,112 @@ static PetscErrorCode CreateBCLabel(DM dm, const char name[])
   PetscFunctionReturn(0);
 }
 
+static PetscErrorCode CreateQuadMesh(MPI_Comm comm, DM *dm, AppCtx *options)
+{
+
+    //6-----7-----8
+    //|\  5 |\  7 |
+    //| \   | \   |
+    //| 4 \ | 6 \ |
+    //3-----4-----5
+    //|\  1 |\  3 |
+    //| \   | \   |
+    //| 0 \ | 2 \ |
+    //0-----1-----2
+
+    //     29    32
+    //   -------------
+    //   |\    |\    |
+    //27 | \26 |28\30|31
+    //   |   \ |   \ |
+    //   |--21-|--25-|
+    //   |\    |\    |
+    //19 | \18 |20\23| 24
+    //   |   \ |   \ |
+    //   -------------
+    //     17     22
+    PetscErrorCode ierr;
+    PetscInt dim = 2;
+    PetscInt numCells=8;
+    PetscInt numVertices=9;
+    PetscInt numCorners=3;
+
+    const int         cell[24]  = {0,1,3, 1,4,3, 1,2,4, 2,5,4, 3,4,6, 4,7,6, 4,5,7, 5,8,7};
+    const double      vertexCoords[18] = {0,0, 0.5,0, 1,0, 0,0.5, 0.5,0.5, 1,0.5, 0,1, 0.5,1, 1,1};
+    const int         markerPoints[16] = {8, 9, 10, 11, 13, 14, 15, 16, 17, 19, 22, 24, 27, 29, 31, 32};
+
+    // int *cell;
+    // double *vertexCoords;
+
+    PetscFunctionBegin;
+    // ierr = PetscMalloc1(numCells*numCorners,&cell);CHKERRQ(ierr);
+    // ierr = PetscMalloc1(numVertices*dim,&vertexCoords);CHKERRQ(ierr);
+
+    // int numCells_x = 2;
+    // int numCells_y = 2;
+    // int v1 = 0;
+    // int v2 = 1;
+    // int v3 = 1+numCells_x; 
+    // int v4 = 2+numCells_x;
+    // int cell_num = 1;
+    // for (int i = 0; i < numCells*numCorners-3; i+=4)
+    // {
+    //     cell[i] = v1;
+    //     cell[i+1] = v2;
+    //     cell[i+2] = v3;
+    //     cell[i+3] = v4;
+    //     if (cell_num == numCells_x)
+    //     {
+    //         v1+=2; v2+=2; v3+=2; v4+=2;
+    //         cell_num =1;
+    //     }
+    //     else
+    //     {
+    //         v1++; v2++; v3++; v4++;
+    //         cell_num++;
+    //     }
+    // }
+
+    // int x = 0;
+    // int y = 0;
+    // cell_num = 0;
+    // for (int i = 0; i < numVertices*dim-1; i+=2)
+    // {
+    //     vertexCoords[i] = x;
+    //     vertexCoords[i+1] = y;
+    //     if (cell_num == numCells_x)
+    //     {
+    //         x = 0; y--;
+    //         cell_num =1;
+    //     }
+    //     else
+    //     {
+    //         x++;
+    //         cell_num++;
+    //     }
+    // }    
+    
+    ierr = DMPlexCreateFromCellList(comm, dim, numCells, numVertices, numCorners, options->interpolate, cell, dim, vertexCoords, dm);CHKERRQ(ierr);
+
+    // PetscInt pStart, pEnd, cStart, cEnd, vStart, vEnd, v, eStart, eEnd;
+    // ierr = DMPlexGetHeightStratum(*dm, 0, &cStart, &cEnd); /* cells */ 
+    // ierr = DMPlexGetHeightStratum(*dm, 1, &eStart, &eEnd); /* edges */ 
+    // ierr = DMPlexGetHeightStratum(*dm, 2, &vStart, &vEnd); /* vertices */
+
+    // printf("Cells: %d %d \n", cStart, cEnd-1);
+    // printf("Vertices: %d %d \n", vStart, vEnd-1);
+    // printf("Edges: %d %d \n", eStart, eEnd-1);
+
+    for (int i = 0; i < 16; i++)
+    {
+      ierr = DMSetLabelValue(*dm, "marker", markerPoints[i], 1);CHKERRQ(ierr);
+    }
+
+    // ierr = PetscFree(cell);CHKERRQ(ierr);
+    // ierr = PetscFree(vertexCoords);CHKERRQ(ierr);
+    PetscFunctionReturn(0);
+}
+
 static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *user, DM *dm)
 {
   PetscInt       dim             = user->dim;
@@ -520,7 +626,7 @@ static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *user, DM *dm)
     PetscInt d;
 
     if (user->periodicity[0] || user->periodicity[1] || user->periodicity[2]) for (d = 0; d < dim; ++d) user->cells[d] = PetscMax(user->cells[d], 3);
-    ierr = DMPlexCreateBoxMesh(comm, dim, user->simplex, user->cells, NULL, NULL, user->periodicity, interpolate, dm);CHKERRQ(ierr);
+    ierr = CreateQuadMesh(comm, dm, user);CHKERRQ(ierr);
     ierr = PetscObjectSetName((PetscObject) *dm, "Mesh");CHKERRQ(ierr);
   } else {
     ierr = DMPlexCreateFromFile(comm, filename, interpolate, dm);CHKERRQ(ierr);
