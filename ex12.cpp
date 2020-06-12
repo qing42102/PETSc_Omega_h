@@ -19,6 +19,17 @@ Information on refinement:
 #include <petscsnes.h>
 #include <petscds.h>
 #include <petscviewerhdf5.h>
+#include <Omega_h_file.hpp>
+#include <Omega_h_library.hpp>
+#include <Omega_h_mesh.hpp>
+#include <Omega_h_comm.hpp>
+#include <Omega_h_build.hpp>
+#include <algorithm>
+#include <vector>
+#include <set>
+#include <iostream>
+#include <petsc/private/dmpleximpl.h> 
+
 
 typedef enum {NEUMANN, DIRICHLET, NONE} BCType;
 typedef enum {RUN_FULL, RUN_EXACT, RUN_TEST, RUN_PERF} RunType;
@@ -504,110 +515,195 @@ static PetscErrorCode CreateBCLabel(DM dm, const char name[])
   PetscFunctionReturn(0);
 }
 
+PetscErrorCode DMPlexBuildCoordinates_Internal(DM dm, PetscInt spaceDim, PetscInt numCells, PetscInt numVertices, const double vertexCoords[])
+{
+  PetscSection   coordSection;
+  Vec            coordinates;
+  DM             cdm;
+  PetscScalar   *coords;
+  PetscInt       v, d;
+  PetscErrorCode ierr;
+
+  PetscFunctionBegin;
+  ierr = PetscLogEventBegin(DMPLEX_CreateFromCellList_Coordinates,dm,0,0,0);CHKERRQ(ierr);
+  ierr = DMSetCoordinateDim(dm, spaceDim);CHKERRQ(ierr);
+  ierr = DMGetCoordinateSection(dm, &coordSection);CHKERRQ(ierr);
+  ierr = PetscSectionSetNumFields(coordSection, 1);CHKERRQ(ierr);
+  ierr = PetscSectionSetFieldComponents(coordSection, 0, spaceDim);CHKERRQ(ierr);
+  ierr = PetscSectionSetChart(coordSection, numCells, numCells + numVertices);CHKERRQ(ierr);
+  for (v = numCells; v < numCells+numVertices; ++v) {
+    ierr = PetscSectionSetDof(coordSection, v, spaceDim);CHKERRQ(ierr);
+    ierr = PetscSectionSetFieldDof(coordSection, v, 0, spaceDim);CHKERRQ(ierr);
+  }
+  ierr = PetscSectionSetUp(coordSection);CHKERRQ(ierr);
+
+  ierr = DMGetCoordinateDM(dm, &cdm);CHKERRQ(ierr);
+  ierr = DMCreateLocalVector(cdm, &coordinates);CHKERRQ(ierr);
+  ierr = VecSetBlockSize(coordinates, spaceDim);CHKERRQ(ierr);
+  ierr = PetscObjectSetName((PetscObject) coordinates, "coordinates");CHKERRQ(ierr);
+  ierr = VecGetArray(coordinates, &coords);CHKERRQ(ierr);
+  for (v = 0; v < numVertices; ++v) {
+    for (d = 0; d < spaceDim; ++d) {
+      coords[v*spaceDim+d] = vertexCoords[v*spaceDim+d];
+    }
+  }
+  ierr = VecRestoreArray(coordinates, &coords);CHKERRQ(ierr);
+  ierr = DMSetCoordinatesLocal(dm, coordinates);CHKERRQ(ierr);
+  ierr = VecDestroy(&coordinates);CHKERRQ(ierr);
+  ierr = PetscLogEventEnd(DMPLEX_CreateFromCellList_Coordinates,dm,0,0,0);CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
+
 static PetscErrorCode CreateQuadMesh(MPI_Comm comm, DM *dm, AppCtx *options)
 {
+  /* 
+  Omega_h mesh representation
+   10---27---12----28---13
+    |       / |       / |
+    | 4    /  |  5   /  |
+   22    21  26    25   29
+    |   /  1  |   /   3 |
+    |  /      |  /      |
+    9---20---11----24---14
+    |       / |        /|
+    | 2   /   | 6    /  |
+   19   18   23    31   32
+    |  /   0  |   /   7 |
+    | /       |  /      |
+    8---17---15----30---16 
 
-    //6-----7-----8
-    //|\  5 |\  7 |
-    //| \   | \   |
-    //| 4 \ | 6 \ |
-    //3-----4-----5
-    //|\  1 |\  3 |
-    //| \   | \   |
-    //| 0 \ | 2 \ |
-    //0-----1-----2
+  PETSc mesh representation
+   10---27---12----29---13
+    |       / |       / |
+    | 4    /  |  5   /  |
+   28    22  21    26   25
+    |   /  1  |   /   3 |
+    |  /      |  /      |
+    9---20---11----24---14
+    |       / |        /|
+    | 2   /   | 6    /  |
+   23   19   18    30   32
+    |  /   0  |   /   7 |
+    | /       |  /      |
+    8---17---15----31---16
+  */
+ 
+  auto lib = Omega_h::Library();
+  auto world = lib.world();
+  auto mesh = Omega_h::build_box(world, OMEGA_H_SIMPLEX, 1., 1., 0, 2, 2, 0);
 
-    //     29    32
-    //   -------------
-    //   |\    |\    |
-    //27 | \26 |28\30|31
-    //   |   \ |   \ |
-    //   |--21-|--25-|
-    //   |\    |\    |
-    //19 | \18 |20\23| 24
-    //   |   \ |   \ |
-    //   -------------
-    //     17     22
-    PetscErrorCode ierr;
-    PetscInt dim = 2;
-    PetscInt numCells=8;
-    PetscInt numVertices=9;
-    PetscInt numCorners=3;
+  const int dim = mesh.dim();
+  const int numCells = mesh.nelems();
+  const int numVertices = mesh.nverts();
+  const int numCorners = 3;
+  const int numEdges = mesh.nedges();
 
-    const int         cell[24]  = {0,1,3, 1,4,3, 1,2,4, 2,5,4, 3,4,6, 4,7,6, 4,5,7, 5,8,7};
-    const double      vertexCoords[18] = {0,0, 0.5,0, 1,0, 0,0.5, 0.5,0.5, 1,0.5, 0,1, 0.5,1, 1,1};
-    const int         markerPoints[16] = {8, 9, 10, 11, 13, 14, 15, 16, 17, 19, 22, 24, 27, 29, 31, 32};
+  // Get the coordinates of vertices
+  Omega_h::HostRead<Omega_h::Real> vertexCoords(mesh.coords());
+  assert(vertexCoords.size() == dim*numVertices);
 
-    // int *cell;
-    // double *vertexCoords;
+  // Get the vertices of each cell
+  Omega_h::HostRead<Omega_h::LO> cell(mesh.ask_elem_verts());
+  assert(cell.size() == numCorners*numCells);
 
-    PetscFunctionBegin;
-    // ierr = PetscMalloc1(numCells*numCorners,&cell);CHKERRQ(ierr);
-    // ierr = PetscMalloc1(numVertices*dim,&vertexCoords);CHKERRQ(ierr);
-
-    // int numCells_x = 2;
-    // int numCells_y = 2;
-    // int v1 = 0;
-    // int v2 = 1;
-    // int v3 = 1+numCells_x; 
-    // int v4 = 2+numCells_x;
-    // int cell_num = 1;
-    // for (int i = 0; i < numCells*numCorners-3; i+=4)
-    // {
-    //     cell[i] = v1;
-    //     cell[i+1] = v2;
-    //     cell[i+2] = v3;
-    //     cell[i+3] = v4;
-    //     if (cell_num == numCells_x)
-    //     {
-    //         v1+=2; v2+=2; v3+=2; v4+=2;
-    //         cell_num =1;
-    //     }
-    //     else
-    //     {
-    //         v1++; v2++; v3++; v4++;
-    //         cell_num++;
-    //     }
-    // }
-
-    // int x = 0;
-    // int y = 0;
-    // cell_num = 0;
-    // for (int i = 0; i < numVertices*dim-1; i+=2)
-    // {
-    //     vertexCoords[i] = x;
-    //     vertexCoords[i+1] = y;
-    //     if (cell_num == numCells_x)
-    //     {
-    //         x = 0; y--;
-    //         cell_num =1;
-    //     }
-    //     else
-    //     {
-    //         x++;
-    //         cell_num++;
-    //     }
-    // }    
-    
-    ierr = DMPlexCreateFromCellList(comm, dim, numCells, numVertices, numCorners, options->interpolate, cell, dim, vertexCoords, dm);CHKERRQ(ierr);
-
-    // PetscInt pStart, pEnd, cStart, cEnd, vStart, vEnd, v, eStart, eEnd;
-    // ierr = DMPlexGetHeightStratum(*dm, 0, &cStart, &cEnd); /* cells */ 
-    // ierr = DMPlexGetHeightStratum(*dm, 1, &eStart, &eEnd); /* edges */ 
-    // ierr = DMPlexGetHeightStratum(*dm, 2, &vStart, &vEnd); /* vertices */
-
-    // printf("Cells: %d %d \n", cStart, cEnd-1);
-    // printf("Vertices: %d %d \n", vStart, vEnd-1);
-    // printf("Edges: %d %d \n", eStart, eEnd-1);
-
-    for (int i = 0; i < 16; i++)
+  // Get the edges for each face
+  Omega_h::Read<Omega_h::LO> face2edges(mesh.get_adj(2, 1).ab2b);
+  assert(face2edges.size() == 3*numCells);
+  std::vector<int> boundary_edge;
+  // If the edge appeared twice, then it is shared by two faces and therefore not a boundary edge
+  for (int i = 0; i < face2edges.size(); i++)
+  {
+    bool duplicate = false;
+    for (int j = 0; j < face2edges.size(); j++)
     {
-      ierr = DMSetLabelValue(*dm, "marker", markerPoints[i], 1);CHKERRQ(ierr);
+      if (i != j && face2edges.get(i) == face2edges.get(j))
+      {
+        duplicate = true;
+        break;
+      }
     }
+    if (duplicate == false)
+    {
+      boundary_edge.push_back(face2edges.get(i));
+    }
+  }
 
-    // ierr = PetscFree(cell);CHKERRQ(ierr);
-    // ierr = PetscFree(vertexCoords);CHKERRQ(ierr);
-    PetscFunctionReturn(0);
+  // Get the vertices for each edge
+  Omega_h::Read<Omega_h::LO> edge2verts = mesh.get_adj(1, 0).ab2b;
+  assert(edge2verts.size() == 2*mesh.nedges());
+  // By using a set, the vertices for all the boundary edges would not repeat
+  // Can be replaced with an unordered_set
+  std::set<int> boundary_vert;
+  for (unsigned int i = 0; i < boundary_edge.size(); i++)
+  {
+    // Insert the two vertices for each edge
+    boundary_vert.insert(edge2verts.get(2*boundary_edge[i])+numCells);
+    boundary_vert.insert(edge2verts.get(2*boundary_edge[i]+1)+numCells);
+  }
+
+  // Make the starting index of edges after number of cells and vertices with a lambda function
+  for_each(boundary_edge.begin(), boundary_edge.end(), [&numCells, &numVertices](int &n){ n=n+numCells+numVertices; });
+
+  PetscErrorCode ierr;
+  ierr = DMCreate(comm, dm);CHKERRQ(ierr);
+  ierr = DMSetType(*dm, DMPLEX);CHKERRQ(ierr);
+  ierr = DMSetDimension(*dm, dim);CHKERRQ(ierr);
+  ierr = DMPlexSetChart(*dm, 0, numCells+numVertices+numEdges);CHKERRQ(ierr);
+  for (int i = 0; i < numEdges; i++)
+  {
+    ierr = DMPlexSetConeSize(*dm, numCells+numVertices+i, 2);CHKERRQ(ierr);
+  }
+  for (int i = 0; i < numCells; i++)
+  {
+    ierr = DMPlexSetConeSize(*dm, i, 3);CHKERRQ(ierr);
+  }
+
+  ierr = DMSetUp(*dm);CHKERRQ(ierr);
+
+  for (int i = 0; i < numCells; i++)
+  {
+    int edges[3];
+    edges[0] = face2edges.get(3*i)+numCells+numVertices;
+    edges[1] = face2edges.get(3*i+1)+numCells+numVertices;
+    edges[2] = face2edges.get(3*i+2)+numCells+numVertices;
+    ierr = DMPlexSetCone(*dm, i, edges);CHKERRQ(ierr);
+  }
+
+  for (int i = 0; i < numEdges; i++)
+  {
+    int verts[2];
+    verts[0] = edge2verts.get(2*i)+numCells;
+    verts[1] = edge2verts.get(2*i+1)+numCells;
+    ierr = DMPlexSetCone(*dm, numCells+numVertices+i, verts);CHKERRQ(ierr);
+
+  }
+
+  ierr = DMPlexSymmetrize(*dm);CHKERRQ(ierr);
+  ierr = DMPlexStratify(*dm);CHKERRQ(ierr);
+
+  ierr = DMPlexBuildCoordinates_Internal(*dm, dim, numCells, numVertices, vertexCoords.data());CHKERRQ(ierr);
+  // ierr = DMSetCoordinates(*dm, vertexCoords.data());
+
+  // Get the starting and ending index for the topology
+  PetscInt cStart, cEnd, vStart, vEnd, eStart, eEnd;
+  ierr = DMPlexGetHeightStratum(*dm, 0, &cStart, &cEnd); /* cells */ 
+  ierr = DMPlexGetHeightStratum(*dm, 1, &eStart, &eEnd); /* edges */ 
+  ierr = DMPlexGetHeightStratum(*dm, 2, &vStart, &vEnd); /* vertices */
+
+  // Mark the boundary vertices and edges in DMPlex
+  for (auto i = boundary_vert.begin(); i != boundary_vert.end(); i++)
+  {
+    ierr = DMSetLabelValue(*dm, "marker", *i, 1);CHKERRQ(ierr);
+  }
+  if (options->interpolate == PETSC_TRUE) 
+  {
+    for (unsigned int i = 0; i < boundary_edge.size(); i++)
+    {
+      ierr = DMSetLabelValue(*dm, "marker", boundary_edge[i], 1);CHKERRQ(ierr);
+    }
+  }
+  
+  PetscFunctionReturn(0);
 }
 
 static PetscErrorCode CreateMesh(MPI_Comm comm, AppCtx *user, DM *dm)
